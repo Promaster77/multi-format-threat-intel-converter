@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Content Transformation Engine</title>
+  <script src="vendor/tailwind.js"></script>
+  <script src="vendor/react.production.min.js"></script>
+  <script src="vendor/react-dom.production.min.js"></script>
+  <style>
+    html, body, #root { height: 100%; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .collapsible-section summary::-webkit-details-marker { display: none; }
+    .collapsible-section summary { list-style: none; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+  <div id="root"></div>
+  <script>
+    const h = React.createElement;
+    const { useState, useEffect } = React;
+
+    const API = ""; // same-origin; serve.py proxies /sources and /jobs
+
+    // ------- output type registry ---------------------------------------------
+    const OUTPUT_TYPES = [
+      { key: "linkedin",          label: "LinkedIn post" },
+      { key: "twitter",           label: "Twitter / X thread" },
+      { key: "advisory",          label: "Advisory" },
+      { key: "infographic",       label: "Infographic" },
+      { key: "executive_summary", label: "Executive summary" },
+      { key: "presentation",      label: "Presentation" },
+      { key: "video_package",     label: "Video package" },
+    ];
+
+    const DEFAULT_PARAMS = {
+      audience: "general",
+      tone: "neutral",
+      detail: "medium",
+      objective: "inform",
+      language: "en",
+      style: ""
+    };
+
+    const DEFAULT_SOURCE = {
+      title: "",
+      source_text: "",
+      context: "",
+      media_kind: "none",
+      media_ref: ""
+    };
+
+    const SAMPLE_TITLE = "Critical RCE in XYZ-VPN (CVE-2026-10421)";
+    const SAMPLE_CONTEXT = "Internal CERT broadcast for SOC and IT leadership.";
+    const SAMPLE_TEXT =
+      "Title: Critical Remote Code Execution Vulnerability in Widely-Used VPN Appliance\n\n" +
+      "CERT-In has issued a high-severity advisory regarding a remote code execution flaw " +
+      "(CVE-2026-10421) affecting XYZ-VPN appliances running firmware versions 9.2 through 9.7. " +
+      "The vulnerability resides in the SSL-VPN pre-authentication path and allows an " +
+      "unauthenticated remote attacker to execute arbitrary code as root. Exploit code is " +
+      "publicly available and mass scanning has been observed from multiple IPs.\n\n" +
+      "Affected systems: XYZ-VPN 9.2, 9.3, 9.4, 9.5, 9.6, 9.7. Patched firmware 9.7.1 is available.\n\n" +
+      "Recommended actions:\n" +
+      "1. Identify all XYZ-VPN appliances in your environment.\n" +
+      "2. Upgrade to firmware 9.7.1 within 24 hours.\n" +
+      "3. Restrict SSL-VPN portal exposure to trusted IPs where feasible.\n" +
+      "4. Monitor for indicators: 198.51.100.7, 203.0.113.42, /admin/sslvpn_tmp_login.\n\n" +
+      "References: vendor advisory V-2026-10421, CERT-In CIAD-2026-0042.";
+
+    // ------- badge palette --------------------------------------------------
+    function badgeClasses(state) {
+      const map = {
+        queued:           "bg-slate-100 text-slate-700",
+        running:          "bg-blue-100 text-blue-800 animate-pulse",
+        completed:        "bg-emerald-100 text-emerald-800",
+        partial_failure:  "bg-amber-100 text-amber-800",
+        failed:           "bg-rose-100 text-rose-800"
+      };
+      return map[state] || "bg-slate-100 text-slate-700";
+    }
+
+    function StateBadge({ state }) {
+      return h("span", {
+        className: "text-xs px-2 py-0.5 rounded-full font-medium " + badgeClasses(state)
+      }, state);
+    }
+
+    const copyToClipboard = async (text) => {
+      try { await navigator.clipboard.writeText(text); return true; }
+      catch (e) { return false; }
+    };
+
+    // ------- per-artefact pretty rendering ---------------------------------
+    function KeyValue({ label, children }) {
+      return h("div", { className: "mb-2" },
+        h("div", { className: "text-xs font-semibold text-slate-500 uppercase tracking-wide mb-0.5" }, label),
+        h("div", { className: "text-sm text-slate-800" }, children)
+      );
+    }
+
+    function FormattedContent({ c, type }) {
+      try {
+        if (type === "advisory") {
+          return h("div", { className: "space-y-1" },
+            h(KeyValue, { label: "Severity" }, c.severity || "—"),
+            h(KeyValue, { label: "Affected systems" }, (c.affected_systems || []).join(", ") || "—"),
+            (c.iocs && c.iocs.length) ? h(KeyValue, { label: "IOCs" }, c.iocs.join(", ")) : null,
+            h(KeyValue, { label: "Action items" },
+              h("ul", { className: "list-disc ml-4" },
+                (c.action_items || []).map((x, i) => h("li", { key: i }, x))
+              )
+            ),
+            (c.references && c.references.length) ? h(KeyValue, { label: "References" }, c.references.join(", ")) : null
+          );
+        }
+        if (type === "infographic") {
+          return h("div", { className: "space-y-2" },
+            h(KeyValue, { label: "Title" }, c.title || "—"),
+            h(KeyValue, { label: "Layout" }, c.layout || "—"),
+            h(KeyValue, { label: "Palette" }, c.color_scheme || "—"),
+            h(KeyValue, { label: "Key points" },
+              h("ul", { className: "list-disc ml-4" },
+                (c.key_points || []).map((x, i) => h("li", { key: i }, x))
+              )
+            ),
+            h(KeyValue, { label: "Call to action" }, c.call_to_action || "—")
+          );
+        }
+        if (type === "executive_summary") {
+          return h("div", { className: "space-y-2" },
+            h(KeyValue, { label: "Risk level" }, c.risk_level || "—"),
+            h(KeyValue, { label: "Business impact" }, c.business_impact || "—"),
+            h(KeyValue, { label: "Timeline" }, c.timeline || "—"),
+            h(KeyValue, { label: "Recommendations" },
+              h("ul", { className: "list-disc ml-4" },
+                (c.recommendations || []).map((x, i) => h("li", { key: i }, x))
+              )
+            ),
+            h(KeyValue, { label: "Decision needed" }, c.decision_needed || "—")
+          );
+        }
+        if (type === "presentation") {
+          return h("div", { className: "space-y-3" },
+            h(KeyValue, { label: "Deck title" }, c.title || "—"),
+            h("ol", { className: "space-y-3" },
+              (c.slides || []).map((s, i) =>
+                h("li", { key: i, className: "border border-slate-200 rounded-md p-3 bg-slate-50" },
+                  h("div", { className: "text-xs font-semibold text-slate-500 mb-1" }, "Slide " + (i + 1)),
+                  h("div", { className: "font-semibold text-slate-900 mb-1" }, s.heading),
+                  h("ul", { className: "list-disc ml-4 text-sm text-slate-700" },
+                    (s.bullets || []).map((b, j) => h("li", { key: j }, b))
+                  )
+                )
+              )
+            ),
+            (c.speaker_notes && c.speaker_notes.length) ?
+              h("details", { className: "collapsible-section" },
+                h("summary", { className: "cursor-pointer text-indigo-700 text-sm font-medium" }, "Speaker notes"),
+                h("ul", { className: "list-disc ml-4 mt-1 text-xs text-slate-600" },
+                  c.speaker_notes.map((n, i) => h("li", { key: i }, n))
+                )
+              ) : null
+          );
+        }
+        if (type === "linkedin") {
+          return h("div", { className: "space-y-2" },
+            h(KeyValue, { label: "Hook" }, c.hook || "—"),
+            h(KeyValue, { label: "Body" },
+              h("div", { className: "whitespace-pre-wrap text-sm text-slate-800 font-mono leading-relaxed" },
+                c.body || "—")
+            ),
+            h(KeyValue, { label: "Hashtags" }, (c.hashtags || []).join(" ") || "—"),
+            h(KeyValue, { label: "Call to action" }, c.cta || "—")
+          );
+        }
+        if (type === "twitter") {
+          return h("div", { className: "space-y-2" },
+            (c.thread || []).map((t, i) =>
+              h("div", { key: i, className: "border border-slate-200 rounded-md p-3 bg-white" },
+                h("div", { className: "text-xs text-slate-500 mb-1" }, "Tweet " + (i + 1)),
+                h("div", { className: "text-sm text-slate-800 whitespace-pre-wrap" }, t.tweet),
+                t.media_suggestion && t.media_suggestion !== "None" ?
+                  h("div", { className: "text-xs text-slate-500 mt-2 italic" }, "media: " + t.media_suggestion)
+                  : null
+              )
+            )
+          );
+        }
+        if (type === "video_package") {
+          return h("div", { className: "space-y-3" },
+            h(KeyValue, { label: "Title" }, c.title || "—"),
+            h(KeyValue, { label: "Script" },
+              h("pre", { className: "whitespace-pre-wrap text-sm text-slate-800 font-mono leading-relaxed bg-slate-50 p-3 rounded border border-slate-200" },
+                c.script || "—")
+            ),
+            h(KeyValue, { label: "Scenes" },
+              h("ol", { className: "space-y-2" },
+                (c.scenes || []).map((s, i) =>
+                  h("li", { key: i, className: "border border-slate-200 rounded-md p-3 bg-white" },
+                    h("div", { className: "text-xs text-slate-500 mb-1" }, "Scene " + (i + 1) + " · " + (s.timestamp || "—")),
+                    h("div", { className: "text-sm text-slate-800 mb-1" }, s.visual || "—"),
+                    h("div", { className: "text-xs text-slate-600 italic" }, s.narration || "")
+                  )
+                )
+              )
+            )
+          );
+        }
+        return h("pre", { className: "whitespace-pre-wrap text-sm text-slate-800 font-mono leading-relaxed bg-slate-50 p-3 rounded border border-slate-200" },
+          JSON.stringify(c, null, 2));
+      } catch (e) {
+        return h("pre", { className: "whitespace-pre-wrap text-sm text-slate-800 font-mono bg-slate-50 p-3 rounded border border-slate-200" },
+          JSON.stringify(c, null, 2));
+      }
+    }
+
+    // ------- copy + download buttons ---------------------------------------
+    function CopyButton({ getText }) {
+      const [copied, setCopied] = useState(false);
+      return h("button", {
+        onClick: async () => {
+          const ok = await copyToClipboard(getText());
+          if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1500); }
+        },
+        className: "text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50"
+      }, copied ? "Copied" : "Copy");
+    }
+
+    function DownloadButton({ getText, filename }) {
+      return h("button", {
+        onClick: () => {
+          try {
+            const blob = new Blob([getText()], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = filename; document.body.appendChild(a);
+            a.click(); a.remove(); URL.revokeObjectURL(url);
+          } catch (e) {}
+        },
+        className: "text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50"
+      }, "Download");
+    }
+
+    // ------- artefact card --------------------------------------------------
+    function ArtefactCard({ a, onRetry }) {
+      const [open, setOpen] = useState(true);
+      const ok = a.status === "completed" && a.content;
+      const c = a.content || {};
+      const typeLabel = (OUTPUT_TYPES.find(o => o.key === a.output_type) || {}).label || a.output_type;
+
+      const getJson = () => JSON.stringify({ output_type: a.output_type, status: a.status, content: c }, null, 2);
+
+      return h("div", { className: "rounded-md border border-slate-200 bg-white p-4" },
+        h("div", { className: "flex items-center justify-between mb-3" },
+          h("div", null,
+            h("div", { className: "text-sm font-semibold text-slate-900" }, typeLabel),
+            h("div", { className: "text-xs text-slate-500" }, a.output_type)
+          ),
+          h("div", { className: "flex gap-2 items-center" },
+            h(StateBadge, { state: a.status }),
+            h("button", {
+              onClick: () => setOpen(o => !o),
+              className: "text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50"
+            }, open ? "Collapse" : "Expand")
+          )
+        ),
+
+        open && ok ? h("div", { className: "space-y-3" },
+          h(FormattedContent, { c, type: a.output_type }),
+          h("div", { className: "flex gap-2 pt-2 border-t border-slate-100" },
+            h(CopyButton, { getText: getJson }),
+            h(DownloadButton, { getText: getJson, filename: a.output_type + ".json" })
+          )
+        ) : null,
+
+        open && !ok ? h("div", null,
+          h("div", { className: "mb-3 rounded bg-amber-50 border border-amber-200 p-2 text-xs text-amber-900" },
+            h("div", { className: "font-semibold mb-1" }, "Generation failed"),
+            h("div", { className: "font-mono" }, a.error_msg || "Unknown error")
+          ),
+          a.raw_output ? h("details", { className: "collapsible-section mb-3" },
+            h("summary", { className: "cursor-pointer text-indigo-700 text-xs font-medium" }, "Raw model output"),
+            h("pre", { className: "whitespace-pre-wrap text-xs text-slate-700 font-mono mt-2 bg-slate-50 p-2 rounded border border-slate-200" },
+              typeof a.raw_output === "string" ? a.raw_output : JSON.stringify(a.raw_output, null, 2))
+          ) : null,
+          onRetry ? h("button", {
+            onClick: onRetry,
+            className: "text-xs px-3 py-1 rounded bg-rose-600 text-white hover:bg-rose-700"
+          }, "Retry this artefact") : null
+        ) : null
+      );
+    }
+
+    // ------- the three input panels (Source, Parameters, Outputs) ----------
+    function SourcePanel({ source, setSource }) {
+      const charCount = (source.source_text || "").length;
+      const overLimit = charCount > 50000;
+
+      const inputBase = "w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none";
+      const labelCls = "block text-sm font-medium text-slate-700 mb-1";
+
+      return h("section", { className: "rounded-md border border-slate-200 bg-white p-5 space-y-4" },
+        h("div", null,
+          h("h2", { className: "text-sm font-semibold text-slate-900 mb-1" }, "1. Source"),
+          h("p", { className: "text-xs text-slate-500" }, "Provide the content you want transformed. Plain English works best.")
+        ),
+        h("div", null,
+          h("label", { className: labelCls }, "Title"),
+          h("input", {
+            className: inputBase,
+            value: source.title,
+            onChange: (e) => setSource({ ...source, title: e.target.value }),
+            placeholder: "Brief headline for the source"
+          })
+        ),
+        h("div", null,
+          h("label", { className: labelCls }, "Source text"),
+          h("textarea", {
+            className: inputBase + " h-48 font-mono",
+            value: source.source_text,
+            onChange: (e) => setSource({ ...source, source_text: e.target.value }),
+            placeholder: "Paste the raw article, advisory, or prompt here"
+          }),
+          h("div", { className: "text-xs text-slate-500 mt-1 text-right" },
+            charCount.toLocaleString() + " / 50,000 characters"
+          )
+        ),
+        h("div", null,
+          h("label", { className: labelCls }, "Context (optional)"),
+          h("textarea", {
+            className: inputBase + " h-20",
+            value: source.context,
+            onChange: (e) => setSource({ ...source, context: e.target.value }),
+            placeholder: "Internal notes for the operator"
+          })
+        ),
+        h("div", { className: "grid grid-cols-1 sm:grid-cols-3 gap-3" },
+          h("div", null,
+            h("label", { className: labelCls }, "Media kind"),
+            h("select", {
+              className: inputBase + " bg-white",
+              value: source.media_kind || "none",
+              onChange: (e) => setSource({ ...source, media_kind: e.target.value })
+            },
+              h("option", { value: "none" }, "None"),
+              h("option", { value: "image" }, "Image"),
+              h("option", { value: "video" }, "Video"),
+              h("option", { value: "document" }, "Document"),
+              h("option", { value: "audio" }, "Audio")
+            )
+          ),
+          h("div", { className: "sm:col-span-2" },
+            h("label", { className: labelCls }, "Media reference"),
+            h("input", {
+              className: inputBase,
+              value: source.media_ref,
+              onChange: (e) => setSource({ ...source, media_ref: e.target.value }),
+              placeholder: "URL or filename"
+            })
+          )
+        )
+      );
+    }
+
+    function ParametersPanel({ params, setParams }) {
+      const labelCls = "block text-sm font-medium text-slate-700 mb-1";
+      const inputBase = "w-full rounded-md border border-slate-300 px-3 py-2 text-sm bg-white focus:border-indigo-500 focus:outline-none";
+
+      const groups = [
+        ["Audience", "audience", ["general", "executive", "technical", "public"]],
+        ["Tone",     "tone",     ["neutral", "formal", "casual", "urgent"]],
+        ["Detail",   "detail",   ["low", "medium", "high"]],
+        ["Objective","objective",["inform", "alert", "persuade"]],
+      ];
+
+      return h("section", { className: "rounded-md border border-slate-200 bg-white p-5 space-y-4" },
+        h("div", null,
+          h("h2", { className: "text-sm font-semibold text-slate-900 mb-1" }, "2. Parameters"),
+          h("p", { className: "text-xs text-slate-500" }, "Tune the tone, audience and level of detail.")
+        ),
+        ...groups.map(([lab, key, opts]) =>
+          h("div", { key },
+            h("label", { className: labelCls }, lab),
+            h("select", {
+              className: inputBase,
+              value: params[key],
+              onChange: (e) => setParams({ ...params, [key]: e.target.value })
+            }, opts.map(o => h("option", { key: o, value: o }, o)))
+          )
+        ),
+        h("div", null,
+          h("label", { className: labelCls }, "Language"),
+          h("select", {
+            className: inputBase,
+            value: params.language,
+            onChange: (e) => setParams({ ...params, language: e.target.value })
+          },
+            h("option", { value: "en" }, "English"),
+            h("option", { value: "hi" }, "Hindi")
+          )
+        ),
+        h("div", null,
+          h("label", { className: labelCls }, "Style notes (optional)"),
+          h("textarea", {
+            className: inputBase.replace("bg-white", "") + " h-20",
+            value: params.style,
+            onChange: (e) => setParams({ ...params, style: e.target.value }),
+            placeholder: "e.g. avoid jargon, keep bullets short"
+          })
+        )
+      );
+    }
+
+    function OutputsPicker({ outputs, setOutputs }) {
+      const toggle = (k) => {
+        if (outputs.includes(k)) setOutputs(outputs.filter(x => x !== k));
+        else setOutputs([...outputs, k]);
+      };
+
+      return h("section", { className: "rounded-md border border-slate-200 bg-white p-5" },
+        h("div", { className: "mb-4" },
+          h("h2", { className: "text-sm font-semibold text-slate-900 mb-1" },
+            "3. Outputs (" + outputs.length + " selected)"
+          ),
+          h("p", { className: "text-xs text-slate-500" }, "Pick one or more deliverables to generate.")
+        ),
+        h("div", { className: "space-y-2" },
+          OUTPUT_TYPES.map(o =>
+            h("label", {
+              key: o.key,
+              className: "flex items-start gap-3 rounded-md border border-slate-200 px-3 py-2 cursor-pointer transition-colors hover:border-slate-400 " +
+                         (outputs.includes(o.key) ? "bg-indigo-50 border-indigo-500" : "bg-white")
+            },
+              h("input", {
+                type: "checkbox",
+                className: "mt-1 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500",
+                checked: outputs.includes(o.key),
+                onChange: () => toggle(o.key)
+              }),
+              h("div", null,
+                h("div", { className: "text-sm font-medium text-slate-900" }, o.label),
+                h("div", { className: "text-xs text-slate-500" }, o.key)
+              )
+            )
+          )
+        )
+      );
+    }
+
+    // ------- error modal ----------------------------------------------------
+    function ErrorModal({ message, onClose }) {
+      if (!message) return null;
+      return h("div", {
+        className: "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      },
+        h("div", { className: "rounded-md bg-white shadow-lg max-w-md w-full p-6" },
+          h("h3", { className: "text-base font-semibold text-rose-700 mb-2" }, "Something went wrong"),
+          h("p", { className: "text-sm text-slate-700 mb-4 whitespace-pre-wrap" }, message),
+          h("div", { className: "flex justify-end" },
+            h("button", {
+              onClick: onClose,
+              className: "text-sm px-4 py-2 rounded bg-rose-600 text-white hover:bg-rose-700"
+            }, "Dismiss")
+          )
+        )
+      );
+    }
+
+    // ------- main app -------------------------------------------------------
+    function App() {
+      const [source, setSource] = useState(DEFAULT_SOURCE);
+      const [params, setParams] = useState(DEFAULT_PARAMS);
+      const [outputs, setOutputs] = useState(["linkedin", "twitter", "advisory"]);
+      const [job, setJob] = useState(null);
+      const [running, setRunning] = useState(false);
+      const [error, setError] = useState(null);
+      const [recent, setRecent] = useState([]);
+
+      const charCount = (source.source_text || "").length;
+      const overLimit = charCount > 50000;
+
+      // poll the job
+      useEffect(() => {
+        if (!job) return;
+        if (job.status === "completed" || job.status === "failed" || job.status === "partial_failure") {
+          setRunning(false);
+          return;
+        }
+        const t = setInterval(async () => {
+          try {
+            const fresh = await fetch(API + "/jobs/" + job.id).then(r => r.json());
+            setJob(fresh);
+          } catch (e) {
+            setError("Polling failed: " + e.message);
+          }
+        }, 1500);
+        return () => clearInterval(t);
+      }, [job]);
+
+      function loadSample() {
+        setSource({
+          title: SAMPLE_TITLE,
+          source_text: SAMPLE_TEXT,
+          context: SAMPLE_CONTEXT,
+          media_kind: "none",
+          media_ref: ""
+        });
+        setParams({ ...DEFAULT_PARAMS, audience: "technical", tone: "urgent", objective: "alert" });
+        setOutputs(["advisory", "executive_summary", "linkedin"]);
+      }
+
+      async function onRun() {
+        setError(null);
+        if (!source.title.trim()) return setError("Title is required.");
+        if (!source.source_text.trim()) return setError("Source text is required.");
+        if (overLimit) return setError("Source exceeds 50,000 characters.");
+        if (outputs.length === 0) return setError("Pick at least one output.");
+        setRunning(true);
+        try {
+          const sRes = await fetch(API + "/sources", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ raw_text: source.source_text })
+          });
+          if (!sRes.ok) throw new Error("source POST " + sRes.status);
+          const { source_id } = await sRes.json();
+
+          const jRes = await fetch(API + "/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              source_id,
+              output_types: outputs,
+              tone: params.tone,
+              audience: params.audience
+            })
+          });
+          if (!jRes.ok) throw new Error("jobs POST " + jRes.status);
+          const { job_id } = await jRes.json();
+
+          const j = await fetch(API + "/jobs/" + job_id).then(r => r.json());
+          setJob(j);
+        } catch (e) {
+          setError(e.message);
+          setRunning(false);
+        }
+      }
+
+      async function retryFailed() {
+        if (!job) return;
+        try {
+          await fetch(API + "/jobs/" + job.id + "/retry", { method: "POST" });
+          const j = await fetch(API + "/jobs/" + job.id).then(r => r.json());
+          setJob(j);
+        } catch (e) { setError(e.message); }
+      }
+
+      const resultsSection = job ? h("section", { className: "space-y-4" },
+        h("div", { className: "flex items-center justify-between" },
+          h("div", null,
+            h("h2", { className: "text-base font-semibold text-slate-900" }, "Results"),
+            h("p", { className: "text-xs text-slate-500" },
+              (job.artefacts || []).filter(a => a.error_msg).length + " failed · " +
+              (job.artefacts || []).filter(a => !a.error_msg).length + " completed · " +
+              (job.artefacts || []).length + " total"
+            )
+          ),
+          h("div", { className: "flex items-center gap-3" },
+            h(StateBadge, { state: job.status }),
+            (job.status === "partial_failure" || job.status === "failed") ?
+              h("button", {
+                onClick: retryFailed,
+                className: "text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50"
+              }, "Retry failed") : null
+          )
+        ),
+        h("div", { className: "space-y-4 divide-y divide-slate-100" },
+          (job.artefacts || []).map((a, i) =>
+            h(ArtefactCard, { key: i, a, onRetry: retryFailed })
+          )
+        )
+      ) : null;
+
+      try {
+        return h("div", { className: "min-h-screen" },
+          // ----- top bar -----
+          h("header", { className: "border-b border-slate-200 bg-white" },
+            h("div", { className: "max-w-7xl mx-auto px-6 py-4 flex items-center justify-between" },
+              h("div", null,
+                h("h1", { className: "text-lg font-semibold text-slate-900" },
+                  "Content Transformation Engine"
+                ),
+                h("p", { className: "text-xs text-slate-500" },
+                  "SIH-26154 · Multi-format converter"
+                )
+              ),
+              h("div", { className: "flex items-center gap-2" },
+                h("button", {
+                  onClick: loadSample,
+                  className: "text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50"
+                }, "Load sample"),
+                h("button", {
+                  onClick: onRun,
+                  disabled: running,
+                  className: "text-sm px-4 py-1.5 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                }, running ? "Running..." : "Run conversion")
+              )
+            )
+          ),
+
+          // ----- body -----
+          h("main", { className: "max-w-7xl mx-auto p-6 space-y-6" },
+
+            // ---- top status strip ----
+            h("div", { className: "rounded-md border border-slate-200 bg-white p-4 flex items-center justify-between" },
+              h("div", null,
+                h("div", { className: "text-xs text-slate-500 uppercase tracking-wide" }, "Current job"),
+                h("div", { className: "text-sm text-slate-900" },
+                  job ? "Job " + job.id.slice(0, 8) + "..." : "No job submitted yet"
+                )
+              ),
+              h("div", { className: "flex items-center gap-3" },
+                job ? h(StateBadge, { state: job.status }) :
+                  h("span", { className: "text-xs px-2 py-0.5 rounded-full font-medium bg-slate-100 text-slate-700" }, "idle"),
+                source.source_text.length > 0 ?
+                  h("span", { className: "text-xs text-slate-500" }, source.source_text.length.toLocaleString() + " chars") : null
+              )
+            ),
+
+            // ---- three columns ----
+            h("div", { className: "grid grid-cols-1 lg:grid-cols-3 gap-6" },
+              h(SourcePanel, { source, setSource }),
+              h(ParametersPanel, { params, setParams }),
+              h(OutputsPicker, { outputs, setOutputs })
+            ),
+
+            // ---- results ----
+            resultsSection
+          ),
+
+          // ----- error modal -----
+          h(ErrorModal, { message: error, onClose: () => setError(null) })
+        );
+      } catch (renderErr) {
+        return h("div", { className: "p-6" },
+          h("h1", { className: "text-lg font-semibold text-rose-700 mb-3" }, "Render error"),
+          h("pre", { className: "text-xs whitespace-pre-wrap bg-rose-50 border border-rose-200 p-3 rounded text-rose-800" },
+            String(renderErr && renderErr.stack || renderErr))
+        );
+      }
+    }
+
+    // ----- ErrorBoundary for safety -----
+    class EB extends React.Component {
+      constructor(p){ super(p); this.state = { err: null }; }
+      static getDerivedStateFromError(err){ return { err }; }
+      componentDidCatch(err, info){ console.error("EB caught:", err, info); }
+      render(){
+        if (this.state.err) {
+          return h("pre", {
+            className: "whitespace-pre-wrap text-sm text-rose-800 font-mono bg-rose-50 border border-rose-200 p-4 rounded-md m-6"
+          }, "Render error: " + this.state.err.message + "\n\n" + (this.state.err.stack || ""));
+        }
+        return this.props.children;
+      }
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(h(EB, null, h(App)));
+  </script>
+</body>
+</html>

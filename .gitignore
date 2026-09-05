@@ -1,0 +1,32 @@
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+
+# Local data + secrets
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+
+# Local runtime state
+.run/
+
+# Cloudflare tunnel binary (regenerate with start.sh setup)
+cloudflared
+
+# Vendored frontend deps already committed — keep them
+# (frontend/vendor/ is intentional)
